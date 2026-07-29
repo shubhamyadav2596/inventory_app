@@ -5,16 +5,32 @@ in through **Apache Kafka (Confluent Cloud)**, the backend applies **FIFO costin
 and persists everything to **PostgreSQL (Neon)**, and a **React + Tailwind** dashboard
 shows stock, costing and the transaction ledger **live**.
 
-![Architecture](docs/diagrams/architecture.png)
+## 🏗️ Architecture (event flow)
+
+```
+ Kafka Simulator            Confluent Cloud              Backend (Render)
+ ───────────────            ────────────────             ─────────────────────
+ scripts/kafkaSimulator.js  topic:                       Node.js + Express
+ or dashboard button   ──►  "inventory-events"      ──►  Kafka Consumer (kafkajs)
+ (5–10 dummy events)        SASL_SSL + PLAIN auth        FIFO Costing Engine
+                                                         REST API + JWT auth
+                                                              │
+                                              SQL (transactional FIFO)
+                                                              ▼
+ React Dashboard (Vercel)                              Neon PostgreSQL
+ ─────────────────────────   ◄── REST + SSE ──         ────────────────
+ Login → Stock Overview →                              products · inventory_batches
+ Ledger · Live updates                                 sales · sale_allocations
+```
 
 ## 🔗 Live Links & Credentials
 
 | Item              | Value                                             |
 | ----------------- | ------------------------------------------------- |
-| Frontend (Vercel) | `https://<your-app>.vercel.app`                   |
-| Backend (Render)  | `https://<your-api>.onrender.com` (`/api/health`) |
+| Frontend (Vercel) | `https://inventory-management-system-silk-pi.vercel.app/`                   |
+| Backend (Render)  | `https://inventory-app-backend-zz0e.onrender.com` (`/api/health`) |
 | Login ID          | `admin`                                           |
-| Password          | `admin123`                                        |
+| Password          | `admin123@123`                                        |
 
 > Replace with your actual URLs after deploying (steps below).
 
@@ -25,7 +41,41 @@ shows stock, costing and the transaction ledger **live**.
 **FIFO (First-In, First-Out)** assumes the *oldest* stock is sold first, so the
 cost of a sale is taken from the oldest purchase batches.
 
-![FIFO Explained](docs/diagrams/fifo-explained.png)
+**Step-by-step worked example:**
+
+```
+STEP 1 — Purchases create batches (cost layers)
+  12 July: Buy 50 @ ₹100   ─►  Batch #1 [50 units @ ₹100 = ₹5,000]
+  13 July: Buy 30 @ ₹120   ─►  Batch #2 [30 units @ ₹120 = ₹3,600]
+  Stock: 80 units, value ₹8,600
+
+STEP 2 — Sale of 60 units (event carries NO price)
+  Take 50 from Batch #1 → 50 × ₹100 = ₹5,000   (batch #1 now empty)
+  Take 10 from Batch #2 → 10 × ₹120 = ₹1,200
+  COGS (FIFO) = ₹5,000 + ₹1,200 = ₹6,200
+
+STEP 3 — Remaining inventory (what the dashboard shows)
+  Batch #2 partial: 20 units @ ₹120
+  Current Qty = 20 · Total Inventory Cost = ₹2,400 · Avg Cost/Unit = ₹120.00
+```
+
+**Step-by-step worked example:**
+
+```
+STEP 1 — Purchases create batches (cost layers)
+  12 July: Buy 50 @ ₹100   ─►  Batch #1 [50 units @ ₹100 = ₹5,000]
+  13 July: Buy 30 @ ₹120   ─►  Batch #2 [30 units @ ₹120 = ₹3,600]
+  Stock: 80 units, value ₹8,600
+
+STEP 2 — Sale of 60 units (event carries NO price)
+  Take 50 from Batch #1 → 50 × ₹100 = ₹5,000   (batch #1 now empty)
+  Take 10 from Batch #2 → 10 × ₹120 = ₹1,200
+  COGS (FIFO) = ₹5,000 + ₹1,200 = ₹6,200
+
+STEP 3 — Remaining inventory (what the dashboard shows)
+  Batch #2 partial: 20 units @ ₹120
+  Current Qty = 20 · Total Inventory Cost = ₹2,400 · Avg Cost/Unit = ₹120.00
+```
 
 **How this repo implements it** (`backend/src/services/fifoService.js`):
 
@@ -54,7 +104,12 @@ cost of a sale is taken from the oldest purchase batches.
 
 ## 🗄️ Data Model
 
-![DB Schema](docs/diagrams/db-schema.png)
+```
+products ──1:N──► inventory_batches          (each purchase = one batch / cost layer)
+products ──1:N──► sales                      (each sale event = one row)
+sales    ──1:N──► sale_allocations ◄──N:1── inventory_batches
+                  (audit trail: which batches a sale consumed, qty + cost each)
+```
 
 | Table               | Purpose                                                        |
 | ------------------- | -------------------------------------------------------------- |
@@ -63,7 +118,29 @@ cost of a sale is taken from the oldest purchase batches.
 | `sales`             | One row per sale with total FIFO cost                          |
 | `sale_allocations`  | Which batch each sale consumed: exact qty, unit price and cost |
 
-Schema: [`backend/src/db/schema.sql`](backend/src/db/schema.sql)
+Schema: [`backend/src/db/schema.sql`](backend/src/db/schema.sql) — tables are
+**auto-created on startup** (idempotent migration), so no manual migration
+step is needed.
+
+---## 🗄️ Data Model
+
+```
+products ──1:N──► inventory_batches          (each purchase = one batch / cost layer)
+products ──1:N──► sales                      (each sale event = one row)
+sales    ──1:N──► sale_allocations ◄──N:1── inventory_batches
+                  (audit trail: which batches a sale consumed, qty + cost each)
+```
+
+| Table               | Purpose                                                        |
+| ------------------- | -------------------------------------------------------------- |
+| `products`          | Product master (auto-created on first event)                   |
+| `inventory_batches` | One row per purchase — the FIFO cost layers (`remaining_qty`)  |
+| `sales`             | One row per sale with total FIFO cost                          |
+| `sale_allocations`  | Which batch each sale consumed: exact qty, unit price and cost |
+
+Schema: [`backend/src/db/schema.sql`](backend/src/db/schema.sql) — tables are
+**auto-created on startup** (idempotent migration), so no manual migration
+step is needed.
 
 ---
 
@@ -189,15 +266,7 @@ inside the backend picks them up and the dashboard updates live (SSE).
 > CORS note: the backend only allows origins listed in `ALLOWED_ORIGINS`
 > (see `backend/src/app.js`), so browsers on any other domain are blocked.
 
----
 
-## 🖼️ Demo
-
-| Login | Dashboard (live) |
-| ----- | ---------------- |
-| ![Login](docs/demo-login.png) | ![Dashboard](docs/demo-live-simulation.png) |
-
----
 
 ## ✅ Requirement Checklist
 
