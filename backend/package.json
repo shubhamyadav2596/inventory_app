@@ -1,0 +1,21 @@
+{
+  "name": "inventory-fifo-backend",
+  "version": "1.0.0",
+  "description": "Inventory Management System (FIFO) - Backend API + Kafka Consumer",
+  "main": "src/server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "db:init": "node src/db/init.js",
+    "simulate": "node scripts/kafkaSimulator.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "kafkajs": "^2.2.4",
+    "pg": "^8.12.0"
+  }
+}
